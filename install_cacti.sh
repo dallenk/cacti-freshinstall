@@ -1,5 +1,14 @@
 #!/bin/bash
 
+# Ensure the script is run as root or with sudo
+if [[ $EUID -ne 0 ]]; then
+  echo "Error: This script must be run as root or with sudo." >&2
+  exit 1
+fi
+
+# Your script logic here
+echo "Running as root or with sudo. Proceeding..."
+
 # Variables
 DB_NAME="cacti"
 DB_USER="cacti_user"
@@ -26,7 +35,7 @@ install_php() {
     if ! command -v php > /dev/null 2>&1; then
         echo "PHP is not installed. Installing PHP..."
         sudo apt update || handle_error "Failed to update packages"
-        sudo apt install -y php php-cli php-fpm php-mysql php-xml \
+        sudo apt install -y -qq php php-cli php-fpm php-mysql php-xml \
             php-gd php-snmp php-curl php-mbstring php-ldap php-zip \
             php-bcmath php-soap php-gmp php-intl || handle_error "Failed to install PHP"
     fi
@@ -55,8 +64,8 @@ update_php_settings() {
 
 # Update packages and install dependencies
 echo "Updating packages and installing dependencies..."
-sudo apt update && sudo apt upgrade -y || handle_error "Failed to update packages"
-sudo apt install -y wget git apache2 mariadb-server ntp expect rrdtool fping || handle_error "Failed to install dependencies"
+sudo apt update && sudo apt upgrade -y -qq || handle_error "Failed to update packages"
+sudo apt install -y -qq wget git apache2 mariadb-server ntp expect rrdtool fping || handle_error "Failed to install dependencies"
 echo "Dependencies installed."
 
 # Check and install PHP if necessary
@@ -109,6 +118,55 @@ fi
 
 cd "$CACTI_DIR" || handle_error "Failed to change directory to Cacti"
 
+# Ask user to select the database schema file
+USER_HOME=$(eval echo "~${SUDO_USER}")
+echo "Select the database schema to import:"
+echo "Listing available .sql files in the SUDO_USER's home directory: $USER_HOME"
+
+# List all .sql files in the SUDO_USER's home directory
+shopt -s nullglob
+SQL_FILES=("$USER_HOME"/*.sql)
+shopt -u nullglob
+
+if [ ${#SQL_FILES[@]} -eq 0 ]; then
+    echo "No .sql files found in the SUDO_USER's home directory."
+else
+    for idx in "${!SQL_FILES[@]}"; do
+        echo "$((idx + 1)). ${SQL_FILES[$idx]}"
+    done
+fi
+
+while true; do
+    echo
+    echo "Please choose one of the following options:"
+    echo "- Enter 'default' to use the default schema (cacti.sql)."
+    echo "- Enter the number corresponding to a file listed above."
+    echo "- Specify the path to a custom schema file."
+    echo "- Type 'exit' to quit."
+
+    read -rp "Your choice: " schema_choice
+
+    if [[ "${schema_choice}" == "default" || -z "${schema_choice}" ]]; then
+        DB_SCHEMA="/var/www/html/cacti/cacti.sql"
+    elif [[ "${schema_choice}" == "exit" ]]; then
+        echo "Exiting the script as requested."
+        exit 0
+    elif [[ "${schema_choice}" =~ ^[0-9]+$ ]] && [ "${schema_choice}" -ge 1 ] && [ "${schema_choice}" -le "${#SQL_FILES[@]}" ]; then
+        DB_SCHEMA="${SQL_FILES[$((schema_choice - 1))]}"
+    else
+        DB_SCHEMA="${schema_choice}"
+    fi
+
+    # Verify that the selected schema file exists
+    if [ -f "${DB_SCHEMA}" ]; then
+        echo "Using schema file: ${DB_SCHEMA}"
+        break
+    else
+        echo "Error: The schema file '${DB_SCHEMA}' does not exist. Please try again."
+    fi
+done
+
+
 # Check if the database already exists and prompt the user to recreate it
 echo "Creating Cacti database and user..."
 DB_EXISTS=$(sudo mysql -u root -e "SHOW DATABASES LIKE '${DB_NAME}';" | grep "${DB_NAME}")
@@ -121,7 +179,7 @@ CREATE DATABASE ${DB_NAME};
 EOF
         [ $? -ne 0 ] && handle_error "Failed to drop and recreate the database"
         echo "Database recreated."
-        sudo mysql -u root ${DB_NAME} < /var/www/html/cacti/cacti.sql || handle_error "Failed to import database schema"
+        sudo mysql -u root ${DB_NAME} < "${DB_SCHEMA}" || handle_error "Failed to import database schema"
         echo "Database schema imported."
     else
         echo "Skipping database recreation."
@@ -132,7 +190,7 @@ CREATE DATABASE ${DB_NAME};
 EOF
     [ $? -ne 0 ] && handle_error "Failed to create the database"
     echo "Database created."
-    sudo mysql -u root ${DB_NAME} < /var/www/html/cacti/cacti.sql || handle_error "Failed to import database schema"
+    sudo mysql -u root ${DB_NAME} < "${DB_SCHEMA}" || handle_error "Failed to import database schema"
     echo "Database schema imported."
 fi
 
@@ -266,7 +324,7 @@ case $poller_choice in
         # Install Spine
         echo "Installing Spine poller..."
         cd /tmp || handle_error "Failed to change to /tmp directory"
-        sudo apt install -y help2man build-essential autoconf automake libtool pkg-config libmariadb-dev libsnmp-dev || handle_error "Failed to install build tools and dependencies"
+        sudo apt install -y -qq help2man build-essential autoconf automake libtool pkg-config libmariadb-dev libsnmp-dev || handle_error "Failed to install build tools and dependencies"
         sudo git clone https://github.com/Cacti/spine.git || handle_error "Failed to clone Spine repository"
         cd spine || handle_error "Failed to change directory to spine"
         ./bootstrap && ./configure && make && sudo make install || handle_error "Failed to build and install Spine"
@@ -274,7 +332,6 @@ case $poller_choice in
         echo 'export PATH=$PATH:/usr/local/spine/bin' | sudo tee /etc/profile.d/spine.sh
         sudo chmod +x /etc/profile.d/spine.sh
         source /etc/profile.d/spine.sh
-        sudo sed -i "s#^\(\$cacti_use_spine *= *\).*#\1true;#" /var/www/html/cacti/include/global.php
 
         echo "Cactid and Spine installed successfully."
         ;;
